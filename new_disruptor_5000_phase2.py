@@ -410,11 +410,8 @@ class Game:
                     break
         
         # Phase 4: LAST RESORT - scan entire map for ANY buildable tile
-        # MODIFIED: Now prioritizes tiles closer to the CENTER of the map
         if paint_used < paint_available:
             print(f"Scanning entire map for {paint_available - paint_used} remaining paint", file=sys.stderr)
-            
-            center_x, center_y = width // 2, height // 2
             
             # Collect all empty tiles on the entire map
             map_empty_tiles = []
@@ -430,23 +427,16 @@ class Game:
                     if tile.tracks_owner == -1 and not tile.inked:
                         cost = type_costs[tile.type]
                         coord = Coord(x, y)
-                        
-                        # Calculate distance to center (Manhattan distance)
-                        dist_to_center = abs(x - center_x) + abs(y - center_y)
-                        
-                        # Store coord, cost, and distance
-                        map_empty_tiles.append((coord, cost, dist_to_center))
+                        map_empty_tiles.append((coord, cost))
             
-            # Sort:
-            # 1. By Cost (Ascending) - Do not waste paint on mountains if plains are available
-            # 2. By Distance to Center (Ascending) - Prefer central tiles among those of equal cost
-            map_empty_tiles.sort(key=lambda x: (x[1], x[2]))
+            # Sort by cost (cheapest first)
+            map_empty_tiles.sort(key=lambda x: x[1])
             
-            for coord, track_cost, dist in map_empty_tiles:
+            for coord, track_cost in map_empty_tiles:
                 if paint_used + track_cost <= paint_available:
                     actions.append(f"PLACE_TRACKS {coord.x} {coord.y}")
                     paint_used += track_cost
-                    print(f"Last resort: building at ({coord.x},{coord.y}): cost={track_cost} dist_center={dist}", file=sys.stderr)
+                    print(f"Last resort: building at ({coord.x},{coord.y}): cost={track_cost}", file=sys.stderr)
                 
                 if paint_used == paint_available:
                     break

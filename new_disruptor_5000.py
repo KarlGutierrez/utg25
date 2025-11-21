@@ -455,29 +455,10 @@ class Game:
 
 
     def get_disruption_target(self) -> int | None:
-        """Choose the best region to disrupt with a two-tier strategy.
-
-        **TWO-TIER STRATEGY:**
-        
-        **Tier 1 (Priority):** Disrupt regions with enemy tracks in point-generating connections.
-        - Focuses on connections where the enemy currently has majority and is scoring points.
-        
-        **Tier 2 (Fallback):** If no point-generating targets exist (early game), disrupt
-        regions with high enemy track concentration.
-        - Prevents enemy from building strong positions early.
-        - Focuses on regions with many enemy tracks even if not yet scoring.
-
-        This ensures we always have disruption targets throughout the game.
-
-        Returns
-        -------
-        Optional[int]
-            The ``region_id`` to target with a ``DISRUPT`` action, or ``None`` if
-            no valid targets exist (rare).
-        """
+        """Choose the best region to disrupt with urgency for almost-inked regions."""
         foe_id = 1 - self.my_id
         
-        # Build a map of which connections are complete/active for each player
+        # Build connection statistics (same as before)
         active_connections = set()
         for y in range(self.grid.height):
             for x in range(self.grid.width):
@@ -485,9 +466,7 @@ class Game:
                 for conn in tile.part_of_active_connections:
                     active_connections.add((conn.from_id, conn.to_id))
         
-        # Count tracks per connection and identify who owns majority
-        connection_stats = {}  # {(from_id, to_id): {'my': count, 'foe': count, 'total': count}}
-        
+        connection_stats = {}
         for y in range(self.grid.height):
             for x in range(self.grid.width):
                 tile = self.grid.tiles[y][x]
@@ -502,18 +481,14 @@ class Game:
                     elif tile.tracks_owner == foe_id:
                         connection_stats[conn_key]['foe'] += 1
         
-        # Identify point-generating connections for opponent
         foe_point_connections = set()
         for conn_key, stats in connection_stats.items():
             if stats['foe'] > stats['my']:
                 foe_point_connections.add(conn_key)
         
-        # TIER 1: Point-generating disruption targets
-        tier1_candidates = []
-        # TIER 2: Aggressive early-game disruption targets
-        tier2_candidates = []
+        # UNIFIED candidate list
+        all_candidates = []
         
-        # Analyze each region
         for region_id, region in self.region_by_id.items():
             if region.inked or region.has_town:
                 continue
@@ -530,7 +505,6 @@ class Game:
                 
                 if tile.tracks_owner == foe_id:
                     foe_tracks_in_region += 1
-                    # Check if part of point-generating connection
                     for conn in tile.part_of_active_connections:
                         conn_key = (conn.from_id, conn.to_id)
                         if conn_key in foe_point_connections:
@@ -546,80 +520,72 @@ class Game:
                             affected_my_connections.add(conn_key)
                             break
             
+            # Skip if no enemy presence
+            if foe_tracks_in_region == 0:
+                continue
+            
+            # Skip if we'd lose too many of our own tracks
+            if my_tracks_in_region > foe_tracks_in_region + 2:
+                continue
+            
             disruptions_to_ink = 3 - region.instability
             
-            # TIER 1: Regions with point-generating enemy tracks
+            # URGENCY MULTIPLIER: Massively boost almost-inked regions
+            urgency_multiplier = {
+                2: 10.0,   # 1 disruption away = 10x multiplier
+                1: 4.0,    # 2 disruptions away = 4x multiplier
+                0: 1.0     # Fresh region = no bonus
+            }[region.instability]
+            
+            # Calculate base strategic value
             if affected_point_connections:
                 foe_points_lost = sum(connection_stats[ck]['foe'] for ck in affected_point_connections if ck in connection_stats)
                 my_points_lost = sum(connection_stats[ck]['my'] for ck in affected_my_connections if ck in connection_stats)
                 net_point_benefit = foe_points_lost - my_points_lost
                 
-                # Only skip if we'd lose significantly more points
-                if net_point_benefit >= -2:
-                    value = (
-                        foe_point_tracks_in_region * 10 +
-                        net_point_benefit * 8 +
-                        len(affected_point_connections) * 6 +
-                        (3 - disruptions_to_ink) * 10 +
-                        foe_tracks_in_region * 2
-                    )
-                    
-                    tier1_candidates.append({
-                        'region_id': region_id,
-                        'value': value,
-                        'foe_point_tracks': foe_point_tracks_in_region,
-                        'foe_points_lost': foe_points_lost,
-                        'my_points_lost': my_points_lost,
-                        'net_benefit': net_point_benefit,
-                        'point_connections': len(affected_point_connections),
-                        'foe_tracks': foe_tracks_in_region,
-                        'instability': region.instability
-                    })
-            
-            # TIER 2: Regions with significant enemy presence (even without points yet)
-            # Only consider if enemy has at least 2 tracks to make it worth disrupting
-            if foe_tracks_in_region >= 2:
-                # Calculate value based on enemy concentration and ease of disruption
-                value = (
-                    foe_tracks_in_region * 5 +          # Enemy track concentration
-                    (3 - disruptions_to_ink) * 8 +      # Ease of inking (prefer unstable)
-                    -my_tracks_in_region * 3            # Penalty for our own tracks
+                base_value = (
+                    foe_point_tracks_in_region * 10 +
+                    net_point_benefit * 8 +
+                    len(affected_point_connections) * 6 +
+                    foe_tracks_in_region * 2
                 )
-                
-                # Only disrupt if we don't have too many of our own tracks there
-                if my_tracks_in_region <= foe_tracks_in_region:
-                    tier2_candidates.append({
-                        'region_id': region_id,
-                        'value': value,
-                        'foe_tracks': foe_tracks_in_region,
-                        'my_tracks': my_tracks_in_region,
-                        'instability': region.instability,
-                        'disruptions_needed': disruptions_to_ink,
-                        'tier': 2
-                    })
+                tier = 1
+            else:
+                # Non-point-generating regions (early game)
+                base_value = (
+                    foe_tracks_in_region * 5 -
+                    my_tracks_in_region * 3
+                )
+                tier = 2
+            
+            # Apply urgency multiplier to final value
+            final_value = base_value * urgency_multiplier
+            
+            all_candidates.append({
+                'region_id': region_id,
+                'value': final_value,
+                'base_value': base_value,
+                'urgency_mult': urgency_multiplier,
+                'foe_tracks': foe_tracks_in_region,
+                'my_tracks': my_tracks_in_region,
+                'instability': region.instability,
+                'tier': tier
+            })
         
-        # Try TIER 1 first (point-generating targets)
-        if tier1_candidates:
-            tier1_candidates.sort(key=lambda x: x['value'], reverse=True)
-            best = tier1_candidates[0]
-            print(f"[TIER 1] Disrupt: R{best['region_id']} v={best['value']} "
-                  f"foe_pts_lost={best['foe_points_lost']} my_pts_lost={best['my_points_lost']} "
-                  f"net={best['net_benefit']} point_conns={best['point_connections']}", 
-                  file=sys.stderr)
-            return best['region_id']
+        if not all_candidates:
+            print("No disruption targets found", file=sys.stderr)
+            return None
         
-        # Fallback to TIER 2 (aggressive early-game disruption)
-        if tier2_candidates:
-            tier2_candidates.sort(key=lambda x: x['value'], reverse=True)
-            best = tier2_candidates[0]
-            print(f"[TIER 2] Disrupt: R{best['region_id']} v={best['value']} "
-                  f"foe_tracks={best['foe_tracks']} my_tracks={best['my_tracks']} "
-                  f"instability={best['instability']}", 
-                  file=sys.stderr)
-            return best['region_id']
+        # Sort by final value (which includes urgency)
+        all_candidates.sort(key=lambda x: x['value'], reverse=True)
+        best = all_candidates[0]
         
-        print("No disruption targets found (rare)", file=sys.stderr)
-        return None
+        print(f"[TIER {best['tier']}] Disrupt: R{best['region_id']} "
+              f"value={best['value']:.1f} (base={best['base_value']:.1f} × {best['urgency_mult']}x) "
+              f"foe={best['foe_tracks']} my={best['my_tracks']} inst={best['instability']}", 
+              file=sys.stderr)
+        
+        return best['region_id']
         
 
     def game_turn(self):
